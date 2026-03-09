@@ -1,6 +1,6 @@
 # cerbox-gx-cpp
 
-A C++17 library to read info from a Victron CerboGX unit over Modbus-TCP
+A C++17 library to read info from a Victron CerboGX unit over MQTT
 
 ## Dependencies
 
