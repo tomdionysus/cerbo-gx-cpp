@@ -68,6 +68,26 @@ else()
     )
 endif()
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBMOSQUITTO REQUIRED libmosquitto)
+
+target_include_directories(cerbo_gx_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${LIBMOSQUITTO_INCLUDE_DIRS}
+)
+
+target_link_directories(cerbo_gx_test PRIVATE
+    ${LIBMOSQUITTO_LIBRARY_DIRS}
+)
+
+target_link_libraries(cerbo_gx_test PRIVATE
+    ${LIBMOSQUITTO_LIBRARIES}
+)
+
+target_compile_options(cerbo_gx_test PRIVATE
+    ${LIBMOSQUITTO_CFLAGS_OTHER}
+)
+
 target_include_directories(cerbo_gx_test
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

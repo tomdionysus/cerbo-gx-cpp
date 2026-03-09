@@ -175,7 +175,7 @@ int main(int argc, char** argv)
             if (!info)
                 continue;
 
-            std::cout << "Unit ID " << info->unit_id << "\n";
+            std::cout << "Unit ID " << info->instance << "\n";
             std::cout << "  " << std::left << std::setw(24) << "Class"
                       << ": VE.Bus / Multi / MultiPlus-type service\n";
             print_opt_double("DC voltage", info->dc_voltage_v, "V", 2);
@@ -221,7 +221,7 @@ int main(int argc, char** argv)
             if (!info)
                 continue;
 
-            std::cout << "Unit ID " << info->unit_id << "\n";
+            std::cout << "Unit ID " << info->instance << "\n";
             std::cout << "  " << std::left << std::setw(24) << "Class"
                       << ": Battery service (SmartShunt/BMV/managed battery)\n";
             print_opt_double("Voltage", info->voltage_v, "V", 2);

@@ -1,28 +1,29 @@
 #pragma once
 
-#include <modbus/modbus.h>
+#include <mosquitto.h>
 
-#include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace cerbo
 {
 
-inline double scale_u16(uint16_t v, double factor)
-{
-    return static_cast<double>(v) / factor;
-}
+class CerboGX;
 
-inline double scale_i16(int16_t v, double factor)
+inline double scale_double(double v, double factor)
 {
-    return static_cast<double>(v) / factor;
+    return v / factor;
 }
 
 inline bool plausible_voltage(double v)
@@ -38,17 +39,6 @@ inline bool plausible_soc(double soc)
 inline bool plausible_current(double a)
 {
     return std::fabs(a) < 5000.0;
-}
-
-inline std::string trim_right_nul_and_space(std::string s)
-{
-    while (!s.empty() &&
-           (s.back() == '\0' || s.back() == ' ' || s.back() == '\t' ||
-            s.back() == '\r' || s.back() == '\n'))
-    {
-        s.pop_back();
-    }
-    return s;
 }
 
 inline std::string battery_state_to_string(int state)
@@ -111,6 +101,111 @@ inline std::string vebus_state_to_string(int state)
     }
 }
 
+inline std::vector<std::string> split_topic(const std::string& s, char delim = '/')
+{
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : s)
+    {
+        if (c == delim)
+        {
+            parts.push_back(cur);
+            cur.clear();
+        }
+        else
+        {
+            cur.push_back(c);
+        }
+    }
+    parts.push_back(cur);
+    return parts;
+}
+
+inline std::optional<std::string> extract_json_value_token(const std::string& payload)
+{
+    const std::string needle = "\"value\"";
+    std::size_t p = payload.find(needle);
+    if (p == std::string::npos)
+        return std::nullopt;
+
+    p = payload.find(':', p + needle.size());
+    if (p == std::string::npos)
+        return std::nullopt;
+    ++p;
+
+    while (p < payload.size() && std::isspace(static_cast<unsigned char>(payload[p])))
+        ++p;
+
+    if (p >= payload.size())
+        return std::nullopt;
+
+    if (payload[p] == '"')
+    {
+        ++p;
+        std::size_t end = p;
+        while (end < payload.size())
+        {
+            if (payload[end] == '"' && payload[end - 1] != '\\')
+                break;
+            ++end;
+        }
+        if (end >= payload.size())
+            return std::nullopt;
+        return payload.substr(p, end - p);
+    }
+
+    std::size_t end = p;
+    while (end < payload.size() && payload[end] != ',' && payload[end] != '}')
+        ++end;
+
+    std::string token = payload.substr(p, end - p);
+
+    std::size_t first = 0;
+    while (first < token.size() && std::isspace(static_cast<unsigned char>(token[first])))
+        ++first;
+
+    std::size_t last = token.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(token[last - 1])))
+        --last;
+
+    if (first >= last)
+        return std::nullopt;
+
+    token = token.substr(first, last - first);
+    if (token == "null")
+        return std::nullopt;
+
+    return token;
+}
+
+inline std::optional<double> token_to_double(const std::optional<std::string>& tok)
+{
+    if (!tok)
+        return std::nullopt;
+    try
+    {
+        return std::stod(*tok);
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+}
+
+inline std::optional<int> token_to_int(const std::optional<std::string>& tok)
+{
+    if (!tok)
+        return std::nullopt;
+    try
+    {
+        return std::stoi(*tok);
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+}
+
 struct SystemInfo
 {
     std::string serial;
@@ -121,154 +216,12 @@ struct SystemInfo
     std::optional<int> battery_state;
 };
 
-class ModbusConnection
-{
-public:
-    ModbusConnection(std::string ip, int port)
-        : ip_(std::move(ip)), port_(port)
-    {
-    }
-
-    ~ModbusConnection()
-    {
-        disconnect();
-    }
-
-    ModbusConnection(const ModbusConnection&) = delete;
-    ModbusConnection& operator=(const ModbusConnection&) = delete;
-
-    bool connect()
-    {
-        disconnect();
-
-        ctx_ = modbus_new_tcp(ip_.c_str(), port_);
-        if (!ctx_)
-            return false;
-
-        if (modbus_connect(ctx_) != 0)
-        {
-            disconnect();
-            return false;
-        }
-
-        return true;
-    }
-
-    void disconnect()
-    {
-        if (ctx_)
-        {
-            modbus_close(ctx_);
-            modbus_free(ctx_);
-            ctx_ = nullptr;
-        }
-    }
-
-    bool is_connected() const
-    {
-        return ctx_ != nullptr;
-    }
-
-    const std::string& ip() const
-    {
-        return ip_;
-    }
-
-    int port() const
-    {
-        return port_;
-    }
-
-    std::string last_error() const
-    {
-        return modbus_strerror(errno);
-    }
-
-    bool read_u16(int unit_id, int addr, uint16_t& value) const
-    {
-        std::vector<uint16_t> regs;
-        if (!read_holding(unit_id, addr, 1, regs))
-            return false;
-        value = regs[0];
-        return true;
-    }
-
-    bool read_i16(int unit_id, int addr, int16_t& value) const
-    {
-        uint16_t raw = 0;
-        if (!read_u16(unit_id, addr, raw))
-            return false;
-        value = static_cast<int16_t>(raw);
-        return true;
-    }
-
-    bool read_i32_be_words(int unit_id, int addr, int32_t& value) const
-    {
-        std::vector<uint16_t> regs;
-        if (!read_holding(unit_id, addr, 2, regs))
-            return false;
-
-        uint32_t u =
-            (static_cast<uint32_t>(regs[0]) << 16) |
-            static_cast<uint32_t>(regs[1]);
-
-        value = static_cast<int32_t>(u);
-        return true;
-    }
-
-    bool read_string_regs(int unit_id, int addr, int reg_count, std::string& out) const
-    {
-        std::vector<uint16_t> regs;
-        if (!read_holding(unit_id, addr, reg_count, regs))
-            return false;
-
-        std::string s;
-        s.reserve(static_cast<size_t>(reg_count) * 2);
-
-        for (uint16_t r : regs)
-        {
-            char hi = static_cast<char>((r >> 8) & 0xFF);
-            char lo = static_cast<char>(r & 0xFF);
-
-            if (hi != '\0') s.push_back(hi);
-            if (lo != '\0') s.push_back(lo);
-        }
-
-        out = trim_right_nul_and_space(s);
-        return true;
-    }
-
-private:
-    bool read_holding(int unit_id, int addr, int count, std::vector<uint16_t>& out) const
-    {
-        if (!ctx_)
-            return false;
-
-        if (modbus_set_slave(ctx_, unit_id) != 0)
-            return false;
-
-        out.assign(static_cast<size_t>(count), 0);
-        int rc = modbus_read_registers(ctx_, addr, count, out.data());
-        if (rc != count)
-        {
-            out.clear();
-            return false;
-        }
-
-        return true;
-    }
-
-    std::string ip_;
-    int port_ = 502;
-    modbus_t* ctx_ = nullptr;
-};
-
 class SmartShuntDevice
 {
 public:
     struct Info
     {
-        int unit_id = -1;
+        int instance = -1;
         std::optional<double> voltage_v;
         std::optional<double> current_a;
         std::optional<double> soc_pct;
@@ -276,82 +229,14 @@ public:
     };
 
     SmartShuntDevice() = default;
+    SmartShuntDevice(const CerboGX* parent, int instance);
 
-    SmartShuntDevice(const ModbusConnection* conn, int unit_id)
-        : conn_(conn), unit_id_(unit_id)
-    {
-    }
-
-    int unit_id() const
-    {
-        return unit_id_;
-    }
-
-    std::optional<Info> read() const
-    {
-        if (!conn_)
-            return std::nullopt;
-
-        Info d;
-        d.unit_id = unit_id_;
-
-        uint16_t u16 = 0;
-        int16_t i16 = 0;
-        int32_t i32 = 0;
-        bool got_any = false;
-
-        if (conn_->read_i32_be_words(unit_id_, 256, i32))
-        {
-            d.power_w = i32;
-            got_any = true;
-        }
-        else if (conn_->read_i16(unit_id_, 258, i16))
-        {
-            d.power_w = static_cast<int32_t>(i16);
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 259, u16))
-        {
-            d.voltage_v = scale_u16(u16, 100.0);
-            got_any = true;
-        }
-
-        if (conn_->read_i16(unit_id_, 261, i16))
-        {
-            d.current_a = scale_i16(i16, 10.0);
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 266, u16))
-        {
-            d.soc_pct = static_cast<double>(u16) / 10.0;
-            got_any = true;
-        }
-
-        if (!got_any)
-            return std::nullopt;
-
-        return d;
-    }
-
-    bool matches_signature() const
-    {
-        auto info = read();
-        if (!info)
-            return false;
-
-        int score = 0;
-        if (info->voltage_v && plausible_voltage(*info->voltage_v)) ++score;
-        if (info->current_a && plausible_current(*info->current_a)) ++score;
-        if (info->soc_pct && plausible_soc(*info->soc_pct)) ++score;
-
-        return score >= 2;
-    }
+    int instance() const { return instance_; }
+    std::optional<Info> read() const;
 
 private:
-    const ModbusConnection* conn_ = nullptr;
-    int unit_id_ = -1;
+    const CerboGX* parent_ = nullptr;
+    int instance_ = -1;
 };
 
 class MultiPlusDevice
@@ -359,7 +244,7 @@ class MultiPlusDevice
 public:
     struct Info
     {
-        int unit_id = -1;
+        int instance = -1;
         std::optional<double> dc_voltage_v;
         std::optional<double> dc_current_a;
         std::optional<double> soc_pct;
@@ -372,188 +257,146 @@ public:
     };
 
     MultiPlusDevice() = default;
+    MultiPlusDevice(const CerboGX* parent, int instance);
 
-    MultiPlusDevice(const ModbusConnection* conn, int unit_id)
-        : conn_(conn), unit_id_(unit_id)
-    {
-    }
-
-    int unit_id() const
-    {
-        return unit_id_;
-    }
-
-    std::optional<Info> read() const
-    {
-        if (!conn_)
-            return std::nullopt;
-
-        Info d;
-        d.unit_id = unit_id_;
-
-        uint16_t u16 = 0;
-        int16_t i16 = 0;
-        bool got_any = false;
-
-        if (conn_->read_u16(unit_id_, 26, u16))
-        {
-            d.dc_voltage_v = scale_u16(u16, 100.0);
-            got_any = true;
-        }
-
-        if (conn_->read_i16(unit_id_, 27, i16))
-        {
-            d.dc_current_a = scale_i16(i16, 10.0);
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 30, u16))
-        {
-            d.soc_pct = static_cast<double>(u16) / 10.0;
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 31, u16))
-        {
-            d.state = static_cast<int>(u16);
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 33, u16))
-        {
-            d.mode = static_cast<int>(u16);
-            got_any = true;
-        }
-
-        if (conn_->read_u16(unit_id_, 28, u16))
-        {
-            d.phase_count = static_cast<int>(u16);
-            got_any = true;
-        }
-
-        if (conn_->read_i16(unit_id_, 23, i16))
-        {
-            d.out_l1_power_w = static_cast<double>(i16);
-            got_any = true;
-        }
-
-        if (conn_->read_i16(unit_id_, 24, i16))
-        {
-            d.out_l2_power_w = static_cast<double>(i16);
-            got_any = true;
-        }
-
-        if (conn_->read_i16(unit_id_, 25, i16))
-        {
-            d.out_l3_power_w = static_cast<double>(i16);
-            got_any = true;
-        }
-
-        if (!got_any)
-            return std::nullopt;
-
-        return d;
-    }
-
-    bool matches_signature() const
-    {
-        auto info = read();
-        if (!info)
-            return false;
-
-        int score = 0;
-        if (info->dc_voltage_v && plausible_voltage(*info->dc_voltage_v)) ++score;
-        if (info->dc_current_a && plausible_current(*info->dc_current_a)) ++score;
-        if (info->soc_pct && plausible_soc(*info->soc_pct)) ++score;
-        if (info->mode && *info->mode >= 1 && *info->mode <= 4) ++score;
-
-        if (info->state)
-        {
-            int s = *info->state;
-            if (s == 0 || s == 1 || s == 2 || s == 3 || s == 4 || s == 5 ||
-                s == 6 || s == 7 || s == 8 || s == 9 || s == 10 || s == 11 ||
-                s == 244 || s == 252)
-            {
-                ++score;
-            }
-        }
-
-        return score >= 3;
-    }
+    int instance() const { return instance_; }
+    std::optional<Info> read() const;
 
 private:
-    const ModbusConnection* conn_ = nullptr;
-    int unit_id_ = -1;
+    const CerboGX* parent_ = nullptr;
+    int instance_ = -1;
 };
 
 class CerboGX
 {
 public:
-    explicit CerboGX(std::string ip, int port = 502)
-        : conn_(std::move(ip), port)
+    explicit CerboGX(std::string ip, int port = 502, int mqtt_port = 1883)
+        : ip_(std::move(ip)), port_(port), mqtt_port_(mqtt_port)
     {
     }
 
+    ~CerboGX()
+    {
+        disconnect();
+    }
+
+    CerboGX(const CerboGX&) = delete;
+    CerboGX& operator=(const CerboGX&) = delete;
+
     bool connect()
     {
-        return conn_.connect();
+        disconnect();
+
+        mosquitto_lib_init();
+
+        mosq_ = mosquitto_new(nullptr, true, this);
+        if (!mosq_)
+            return false;
+
+        mosquitto_message_callback_set(mosq_, &CerboGX::on_message_static);
+
+        const int rc = mosquitto_connect(mosq_, ip_.c_str(), mqtt_port_, 60);
+        if (rc != MOSQ_ERR_SUCCESS)
+        {
+            last_error_ = mosquitto_strerror(rc);
+            disconnect();
+            return false;
+        }
+
+        const int sub_rc = mosquitto_subscribe(mosq_, nullptr, "N/#", 0);
+        if (sub_rc != MOSQ_ERR_SUCCESS)
+        {
+            last_error_ = mosquitto_strerror(sub_rc);
+            disconnect();
+            return false;
+        }
+
+        const int loop_rc = mosquitto_loop_start(mosq_);
+        if (loop_rc != MOSQ_ERR_SUCCESS)
+        {
+            last_error_ = mosquitto_strerror(loop_rc);
+            disconnect();
+            return false;
+        }
+
+        connected_ = true;
+
+        if (!wait_for_portal_id(2000))
+        {
+            last_error_ = "MQTT connected, but portal ID was not observed on N/#";
+            return false;
+        }
+
+        request_full_publish(false);
+        wait_for_full_publish(3000);
+
+        return true;
     }
 
     void disconnect()
     {
         multiplus_devices_.clear();
         smartshunt_devices_.clear();
-        conn_.disconnect();
+
+        if (mosq_)
+        {
+            mosquitto_loop_stop(mosq_, true);
+            mosquitto_disconnect(mosq_);
+            mosquitto_destroy(mosq_);
+            mosq_ = nullptr;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            topic_cache_.clear();
+            discovered_services_.clear();
+            portal_id_.clear();
+            full_publish_completed_ = false;
+        }
+
+        connected_ = false;
+        mosquitto_lib_cleanup();
     }
 
     bool is_connected() const
     {
-        return conn_.is_connected();
+        return connected_;
     }
 
     const std::string& ip() const
     {
-        return conn_.ip();
+        return ip_;
     }
 
     int port() const
     {
-        return conn_.port();
+        return port_;
+    }
+
+    int mqtt_port() const
+    {
+        return mqtt_port_;
     }
 
     std::string last_error() const
     {
-        return conn_.last_error();
+        return last_error_;
     }
 
     std::optional<SystemInfo> info() const
     {
-        if (!conn_.is_connected())
+        if (!connected_)
             return std::nullopt;
 
         SystemInfo info;
 
-        std::string serial;
-        if (conn_.read_string_regs(100, 800, 6, serial))
-            info.serial = serial;
-
-        uint16_t u16 = 0;
-        int16_t i16 = 0;
-
-        if (conn_.read_u16(100, 840, u16))
-            info.battery_voltage_v = scale_u16(u16, 10.0);
-
-        if (conn_.read_i16(100, 841, i16))
-            info.battery_current_a = scale_i16(i16, 10.0);
-
-        if (conn_.read_i16(100, 842, i16))
-            info.battery_power_w = static_cast<int32_t>(i16);
-
-        if (conn_.read_u16(100, 843, u16))
-            info.battery_soc_pct = static_cast<double>(u16);
-
-        if (conn_.read_u16(100, 844, u16))
-            info.battery_state = static_cast<int>(u16);
+        info.serial = first_string("system", 0, {"Serial", "serial"}).value_or("");
+        info.battery_voltage_v = first_double("system", 0, {"Dc/Battery/Voltage"});
+        info.battery_current_a = first_double("system", 0, {"Dc/Battery/Current"});
+        if (auto p = first_double("system", 0, {"Dc/Battery/Power"}))
+            info.battery_power_w = static_cast<int32_t>(std::llround(*p));
+        info.battery_soc_pct = first_double("system", 0, {"Dc/Battery/Soc", "Soc"});
+        info.battery_state = first_int("system", 0, {"Dc/Battery/State", "State"});
 
         if (info.serial.empty() &&
             !info.battery_voltage_v &&
@@ -573,29 +416,39 @@ public:
         multiplus_devices_.clear();
         smartshunt_devices_.clear();
 
-        if (!conn_.is_connected())
+        if (!connected_)
             return;
 
-        std::set<int> seen_multiplus;
-        std::set<int> seen_smartshunt;
+        request_full_publish(true);
+        wait_for_full_publish(2000);
 
-        for (int unit = 1; unit <= 247; ++unit)
+        std::set<int> mp_seen;
+        std::set<int> bat_seen;
+
+        std::vector<std::pair<std::string, int>> snapshot;
         {
-            if (unit == 100)
-                continue;
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& item : discovered_services_)
+                snapshot.push_back(item);
+        }
 
-            MultiPlusDevice mp(&conn_, unit);
-            if (mp.matches_signature() && !seen_multiplus.count(unit))
+        for (const auto& [service, instance] : snapshot)
+        {
+            if (service == "vebus")
             {
-                multiplus_devices_.push_back(mp);
-                seen_multiplus.insert(unit);
+                if (!mp_seen.count(instance))
+                {
+                    multiplus_devices_.emplace_back(this, instance);
+                    mp_seen.insert(instance);
+                }
             }
-
-            SmartShuntDevice ss(&conn_, unit);
-            if (ss.matches_signature() && !seen_smartshunt.count(unit))
+            else if (service == "battery")
             {
-                smartshunt_devices_.push_back(ss);
-                seen_smartshunt.insert(unit);
+                if (!bat_seen.count(instance))
+                {
+                    smartshunt_devices_.emplace_back(this, instance);
+                    bat_seen.insert(instance);
+                }
             }
         }
     }
@@ -611,9 +464,242 @@ public:
     }
 
 private:
-    ModbusConnection conn_;
+    friend class SmartShuntDevice;
+    friend class MultiPlusDevice;
+
+    static void on_message_static(struct mosquitto*, void* obj, const struct mosquitto_message* msg)
+    {
+        if (!obj || !msg || !msg->topic)
+            return;
+        static_cast<CerboGX*>(obj)->on_message(msg);
+    }
+
+    void on_message(const struct mosquitto_message* msg)
+    {
+        const std::string topic = msg->topic ? msg->topic : "";
+        const std::string payload =
+            (msg->payload && msg->payloadlen > 0)
+                ? std::string(static_cast<const char*>(msg->payload),
+                              static_cast<std::size_t>(msg->payloadlen))
+                : std::string();
+
+        const auto parts = split_topic(topic);
+        if (parts.size() < 2 || parts[0] != "N")
+            return;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (portal_id_.empty())
+            portal_id_ = parts[1];
+
+        topic_cache_[topic] = payload;
+
+        if (parts.size() >= 4)
+        {
+            try
+            {
+                const int instance = std::stoi(parts[3]);
+                discovered_services_.insert({parts[2], instance});
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (parts.size() == 3 && parts[2] == "full_publish_completed")
+            full_publish_completed_ = true;
+    }
+
+    bool wait_for_portal_id(int timeout_ms)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!portal_id_.empty())
+                    return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return false;
+    }
+
+    bool wait_for_full_publish(int timeout_ms)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (full_publish_completed_)
+                    return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return false;
+    }
+
+    void request_full_publish(bool reset_flag)
+    {
+        std::string portal;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            portal = portal_id_;
+            if (reset_flag)
+                full_publish_completed_ = false;
+        }
+
+        if (portal.empty() || !mosq_)
+            return;
+
+        const std::string topic = "R/" + portal + "/keepalive";
+        const int rc = mosquitto_publish(mosq_, nullptr, topic.c_str(), 0, nullptr, 0, false);
+        if (rc != MOSQ_ERR_SUCCESS)
+            last_error_ = mosquitto_strerror(rc);
+    }
+
+    std::optional<std::string> raw_topic_value(const std::string& topic) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = topic_cache_.find(topic);
+        if (it == topic_cache_.end())
+            return std::nullopt;
+        return it->second;
+    }
+
+    std::optional<std::string> first_string(const std::string& service,
+                                            int instance,
+                                            const std::vector<std::string>& suffixes) const
+    {
+        for (const auto& suffix : suffixes)
+        {
+            const auto topic = make_topic(service, instance, suffix);
+            const auto raw = raw_topic_value(topic);
+            const auto tok = extract_json_value_token(raw.value_or(""));
+            if (tok)
+                return tok;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<double> first_double(const std::string& service,
+                                       int instance,
+                                       const std::vector<std::string>& suffixes) const
+    {
+        for (const auto& suffix : suffixes)
+        {
+            const auto topic = make_topic(service, instance, suffix);
+            const auto raw = raw_topic_value(topic);
+            const auto tok = extract_json_value_token(raw.value_or(""));
+            const auto val = token_to_double(tok);
+            if (val)
+                return val;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<int> first_int(const std::string& service,
+                                 int instance,
+                                 const std::vector<std::string>& suffixes) const
+    {
+        for (const auto& suffix : suffixes)
+        {
+            const auto topic = make_topic(service, instance, suffix);
+            const auto raw = raw_topic_value(topic);
+            const auto tok = extract_json_value_token(raw.value_or(""));
+            const auto val = token_to_int(tok);
+            if (val)
+                return val;
+        }
+        return std::nullopt;
+    }
+
+    std::string make_topic(const std::string& service, int instance, const std::string& suffix) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (portal_id_.empty())
+            return {};
+        return "N/" + portal_id_ + "/" + service + "/" + std::to_string(instance) + "/" + suffix;
+    }
+
+    std::string ip_;
+    int port_ = 502;          // kept for API compatibility
+    int mqtt_port_ = 1883;    // actual transport used in this refactor
+
+    mutable std::mutex mutex_;
+    struct mosquitto* mosq_ = nullptr;
+    bool connected_ = false;
+    std::string last_error_;
+
+    std::string portal_id_;
+    bool full_publish_completed_ = false;
+    std::map<std::string, std::string> topic_cache_;
+    std::set<std::pair<std::string, int>> discovered_services_;
+
     std::vector<MultiPlusDevice> multiplus_devices_;
     std::vector<SmartShuntDevice> smartshunt_devices_;
 };
+
+inline SmartShuntDevice::SmartShuntDevice(const CerboGX* parent, int instance)
+    : parent_(parent), instance_(instance)
+{
+}
+
+inline std::optional<SmartShuntDevice::Info> SmartShuntDevice::read() const
+{
+    if (!parent_ || !parent_->is_connected())
+        return std::nullopt;
+
+    Info d;
+    d.instance = instance_;
+    d.voltage_v = parent_->first_double("battery", instance_, {"Dc/0/Voltage", "Dc/Voltage", "Voltage"});
+    d.current_a = parent_->first_double("battery", instance_, {"Dc/0/Current", "Dc/Current", "Current"});
+    d.soc_pct = parent_->first_double("battery", instance_, {"Soc"});
+    if (auto p = parent_->first_double("battery", instance_, {"Dc/0/Power", "Dc/Power", "Power"}))
+        d.power_w = static_cast<int32_t>(std::llround(*p));
+
+    if (!d.voltage_v && !d.current_a && !d.soc_pct && !d.power_w)
+        return std::nullopt;
+
+    return d;
+}
+
+inline MultiPlusDevice::MultiPlusDevice(const CerboGX* parent, int instance)
+    : parent_(parent), instance_(instance)
+{
+}
+
+inline std::optional<MultiPlusDevice::Info> MultiPlusDevice::read() const
+{
+    if (!parent_ || !parent_->is_connected())
+        return std::nullopt;
+
+    Info d;
+    d.instance = instance_;
+    d.dc_voltage_v = parent_->first_double("vebus", instance_, {"Dc/0/Voltage", "Dc/Voltage", "Voltage"});
+    d.dc_current_a = parent_->first_double("vebus", instance_, {"Dc/0/Current", "Dc/Current", "Current"});
+    d.soc_pct = parent_->first_double("vebus", instance_, {"Soc"});
+    d.state = parent_->first_int("vebus", instance_, {"State"});
+    d.mode = parent_->first_int("vebus", instance_, {"Mode"});
+    d.out_l1_power_w = parent_->first_double("vebus", instance_, {"Ac/Out/L1/P", "Ac/Out/L1/Power"});
+    d.out_l2_power_w = parent_->first_double("vebus", instance_, {"Ac/Out/L2/P", "Ac/Out/L2/Power"});
+    d.out_l3_power_w = parent_->first_double("vebus", instance_, {"Ac/Out/L3/P", "Ac/Out/L3/Power"});
+
+    int phases = 0;
+    if (d.out_l1_power_w) ++phases;
+    if (d.out_l2_power_w) ++phases;
+    if (d.out_l3_power_w) ++phases;
+    if (phases > 0)
+        d.phase_count = phases;
+
+    if (!d.dc_voltage_v && !d.dc_current_a && !d.soc_pct &&
+        !d.state && !d.mode && !d.out_l1_power_w && !d.out_l2_power_w && !d.out_l3_power_w)
+    {
+        return std::nullopt;
+    }
+
+    return d;
+}
 
 } // namespace cerbo

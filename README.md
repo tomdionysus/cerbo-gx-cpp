@@ -2,6 +2,19 @@
 
 A C++17 library to read info from a Victron CerboGX unit over Modbus-TCP
 
+## Dependencies
+
+### Linux (apt)
+
+```sh
+sudo apt install mosquitto mosquitto-clients libmodbus-dev
+```
+
+### MacOSX
+```sh
+brew install mosquitto libmodbus
+```
+
 ## Build
 
 ```sh
