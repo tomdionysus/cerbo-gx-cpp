@@ -8,12 +8,16 @@
 struct Args
 {
     std::string ip;
-    int port = 502;
+    int mqtt_port = 1883;
+    int legacy_port = 502;
 };
 
 static void usage(const char* argv0)
 {
-    std::cerr << "Usage: " << argv0 << " --ip <cerbo-ip> [--port <port>]\n";
+    std::cerr
+        << "Usage: " << argv0 << " --ip <cerbo-ip> [--mqtt-port <port>] [--port <legacy-port>]\n"
+        << "  --mqtt-port  MQTT port used for transport (default: 1883)\n"
+        << "  --port       Legacy API compatibility field only (default: 502)\n";
 }
 
 static std::optional<Args> parse_args(int argc, char** argv)
@@ -33,6 +37,24 @@ static std::optional<Args> parse_args(int argc, char** argv)
             }
             args.ip = argv[++i];
         }
+        else if (a == "--mqtt-port")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Missing value for --mqtt-port\n";
+                return std::nullopt;
+            }
+
+            try
+            {
+                args.mqtt_port = std::stoi(argv[++i]);
+            }
+            catch (...)
+            {
+                std::cerr << "Invalid MQTT port\n";
+                return std::nullopt;
+            }
+        }
         else if (a == "--port")
         {
             if (i + 1 >= argc)
@@ -43,7 +65,7 @@ static std::optional<Args> parse_args(int argc, char** argv)
 
             try
             {
-                args.port = std::stoi(argv[++i]);
+                args.legacy_port = std::stoi(argv[++i]);
             }
             catch (...)
             {
@@ -64,7 +86,13 @@ static std::optional<Args> parse_args(int argc, char** argv)
         return std::nullopt;
     }
 
-    if (args.port <= 0 || args.port > 65535)
+    if (args.mqtt_port <= 0 || args.mqtt_port > 65535)
+    {
+        std::cerr << "MQTT port must be 1..65535\n";
+        return std::nullopt;
+    }
+
+    if (args.legacy_port <= 0 || args.legacy_port > 65535)
     {
         std::cerr << "Port must be 1..65535\n";
         return std::nullopt;
@@ -120,17 +148,17 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    cerbo::CerboGX cerbo(args->ip, args->port);
+    cerbo::CerboGX cerbo(args->ip, args->legacy_port, args->mqtt_port);
 
     if (!cerbo.connect())
     {
-        std::cerr << "Failed to connect to " << cerbo.ip() << ":" << cerbo.port()
+        std::cerr << "Failed to connect to " << cerbo.ip() << ":" << cerbo.mqtt_port()
                   << " : " << cerbo.last_error() << "\n";
         return 1;
     }
 
-    std::cout << "Connected to Cerbo GX Modbus-TCP at "
-              << cerbo.ip() << ":" << cerbo.port() << "\n\n";
+    std::cout << "Connected to Cerbo GX MQTT at "
+              << cerbo.ip() << ":" << cerbo.mqtt_port() << "\n\n";
 
     std::cout << "System\n";
     std::cout << "======\n";
@@ -152,7 +180,7 @@ int main(int argc, char** argv)
         std::cout << "  " << std::left << std::setw(24) << "Battery state"
                   << ": ";
         if (sys->battery_state)
-            std::cout << cerbo::battery_state_to_string(*sys->battery_state);
+            std::cout << cerbo::SmartShuntDevice::state_to_string(*sys->battery_state);
         else
             std::cout << "n/a";
         std::cout << "\n\n";
@@ -185,7 +213,7 @@ int main(int argc, char** argv)
             std::cout << "  " << std::left << std::setw(24) << "Mode"
                       << ": ";
             if (info->mode)
-                std::cout << cerbo::vebus_mode_to_string(*info->mode);
+                std::cout << cerbo::MultiPlusDevice::mode_to_string(*info->mode);
             else
                 std::cout << "n/a";
             std::cout << "\n";
@@ -193,7 +221,7 @@ int main(int argc, char** argv)
             std::cout << "  " << std::left << std::setw(24) << "State"
                       << ": ";
             if (info->state)
-                std::cout << cerbo::vebus_state_to_string(*info->state);
+                std::cout << cerbo::MultiPlusDevice::state_to_string(*info->state);
             else
                 std::cout << "n/a";
             std::cout << "\n";

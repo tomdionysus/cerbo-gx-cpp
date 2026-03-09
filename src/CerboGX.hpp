@@ -2,15 +2,17 @@
 
 #include <mosquitto.h>
 
+#include "MultiPlusDevice.hpp"
+#include "SmartShuntDevice.hpp"
+
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -19,257 +21,19 @@
 namespace cerbo
 {
 
-class CerboGX;
-
-inline double scale_double(double v, double factor)
-{
-    return v / factor;
-}
-
-inline bool plausible_voltage(double v)
-{
-    return v > 1.0 && v < 100.0;
-}
-
-inline bool plausible_soc(double soc)
-{
-    return soc >= 0.0 && soc <= 100.0;
-}
-
-inline bool plausible_current(double a)
-{
-    return std::fabs(a) < 5000.0;
-}
-
-inline std::string battery_state_to_string(int state)
-{
-    switch (state)
-    {
-        case 0: return "Idle";
-        case 1: return "Charging";
-        case 2: return "Discharging";
-        default:
-        {
-            std::ostringstream os;
-            os << "Unknown(" << state << ")";
-            return os.str();
-        }
-    }
-}
-
-inline std::string vebus_mode_to_string(int mode)
-{
-    switch (mode)
-    {
-        case 1: return "Charger Only";
-        case 2: return "Inverter Only";
-        case 3: return "On";
-        case 4: return "Off";
-        default:
-        {
-            std::ostringstream os;
-            os << "Unknown(" << mode << ")";
-            return os.str();
-        }
-    }
-}
-
-inline std::string vebus_state_to_string(int state)
-{
-    switch (state)
-    {
-        case 0: return "Off";
-        case 1: return "Low Power";
-        case 2: return "Fault";
-        case 3: return "Bulk";
-        case 4: return "Absorption";
-        case 5: return "Float";
-        case 6: return "Storage";
-        case 7: return "Equalize";
-        case 8: return "Passthru";
-        case 9: return "Inverting";
-        case 10: return "Power Assist";
-        case 11: return "Power Supply";
-        case 244: return "Sustain";
-        case 252: return "External Control";
-        default:
-        {
-            std::ostringstream os;
-            os << "Unknown(" << state << ")";
-            return os.str();
-        }
-    }
-}
-
-inline std::vector<std::string> split_topic(const std::string& s, char delim = '/')
-{
-    std::vector<std::string> parts;
-    std::string cur;
-    for (char c : s)
-    {
-        if (c == delim)
-        {
-            parts.push_back(cur);
-            cur.clear();
-        }
-        else
-        {
-            cur.push_back(c);
-        }
-    }
-    parts.push_back(cur);
-    return parts;
-}
-
-inline std::optional<std::string> extract_json_value_token(const std::string& payload)
-{
-    const std::string needle = "\"value\"";
-    std::size_t p = payload.find(needle);
-    if (p == std::string::npos)
-        return std::nullopt;
-
-    p = payload.find(':', p + needle.size());
-    if (p == std::string::npos)
-        return std::nullopt;
-    ++p;
-
-    while (p < payload.size() && std::isspace(static_cast<unsigned char>(payload[p])))
-        ++p;
-
-    if (p >= payload.size())
-        return std::nullopt;
-
-    if (payload[p] == '"')
-    {
-        ++p;
-        std::size_t end = p;
-        while (end < payload.size())
-        {
-            if (payload[end] == '"' && payload[end - 1] != '\\')
-                break;
-            ++end;
-        }
-        if (end >= payload.size())
-            return std::nullopt;
-        return payload.substr(p, end - p);
-    }
-
-    std::size_t end = p;
-    while (end < payload.size() && payload[end] != ',' && payload[end] != '}')
-        ++end;
-
-    std::string token = payload.substr(p, end - p);
-
-    std::size_t first = 0;
-    while (first < token.size() && std::isspace(static_cast<unsigned char>(token[first])))
-        ++first;
-
-    std::size_t last = token.size();
-    while (last > first && std::isspace(static_cast<unsigned char>(token[last - 1])))
-        --last;
-
-    if (first >= last)
-        return std::nullopt;
-
-    token = token.substr(first, last - first);
-    if (token == "null")
-        return std::nullopt;
-
-    return token;
-}
-
-inline std::optional<double> token_to_double(const std::optional<std::string>& tok)
-{
-    if (!tok)
-        return std::nullopt;
-    try
-    {
-        return std::stod(*tok);
-    }
-    catch (...)
-    {
-        return std::nullopt;
-    }
-}
-
-inline std::optional<int> token_to_int(const std::optional<std::string>& tok)
-{
-    if (!tok)
-        return std::nullopt;
-    try
-    {
-        return std::stoi(*tok);
-    }
-    catch (...)
-    {
-        return std::nullopt;
-    }
-}
-
-struct SystemInfo
-{
-    std::string serial;
-    std::optional<double> battery_voltage_v;
-    std::optional<double> battery_current_a;
-    std::optional<int32_t> battery_power_w;
-    std::optional<double> battery_soc_pct;
-    std::optional<int> battery_state;
-};
-
-class SmartShuntDevice
-{
-public:
-    struct Info
-    {
-        int instance = -1;
-        std::optional<double> voltage_v;
-        std::optional<double> current_a;
-        std::optional<double> soc_pct;
-        std::optional<int32_t> power_w;
-    };
-
-    SmartShuntDevice() = default;
-    SmartShuntDevice(const CerboGX* parent, int instance);
-
-    int instance() const { return instance_; }
-    std::optional<Info> read() const;
-
-private:
-    const CerboGX* parent_ = nullptr;
-    int instance_ = -1;
-};
-
-class MultiPlusDevice
-{
-public:
-    struct Info
-    {
-        int instance = -1;
-        std::optional<double> dc_voltage_v;
-        std::optional<double> dc_current_a;
-        std::optional<double> soc_pct;
-        std::optional<int> state;
-        std::optional<int> mode;
-        std::optional<int> phase_count;
-        std::optional<double> out_l1_power_w;
-        std::optional<double> out_l2_power_w;
-        std::optional<double> out_l3_power_w;
-    };
-
-    MultiPlusDevice() = default;
-    MultiPlusDevice(const CerboGX* parent, int instance);
-
-    int instance() const { return instance_; }
-    std::optional<Info> read() const;
-
-private:
-    const CerboGX* parent_ = nullptr;
-    int instance_ = -1;
-};
-
 class CerboGX
 {
 public:
+    struct SystemInfo
+    {
+        std::string serial;
+        std::optional<double> battery_voltage_v;
+        std::optional<double> battery_current_a;
+        std::optional<int32_t> battery_power_w;
+        std::optional<double> battery_soc_pct;
+        std::optional<int> battery_state;
+    };
+
     explicit CerboGX(std::string ip, int port = 502, int mqtt_port = 1883)
         : ip_(std::move(ip)), port_(port), mqtt_port_(mqtt_port)
     {
@@ -291,7 +55,10 @@ public:
 
         mosq_ = mosquitto_new(nullptr, true, this);
         if (!mosq_)
+        {
+            last_error_ = "mosquitto_new() failed";
             return false;
+        }
 
         mosquitto_message_callback_set(mosq_, &CerboGX::on_message_static);
 
@@ -358,22 +125,22 @@ public:
         mosquitto_lib_cleanup();
     }
 
-    bool is_connected() const
+    bool is_connected() const noexcept
     {
         return connected_;
     }
 
-    const std::string& ip() const
+    const std::string& ip() const noexcept
     {
         return ip_;
     }
 
-    int port() const
+    int port() const noexcept
     {
         return port_;
     }
 
-    int mqtt_port() const
+    int mqtt_port() const noexcept
     {
         return mqtt_port_;
     }
@@ -393,8 +160,10 @@ public:
         info.serial = first_string("system", 0, {"Serial", "serial"}).value_or("");
         info.battery_voltage_v = first_double("system", 0, {"Dc/Battery/Voltage"});
         info.battery_current_a = first_double("system", 0, {"Dc/Battery/Current"});
-        if (auto p = first_double("system", 0, {"Dc/Battery/Power"}))
+
+        if (const auto p = first_double("system", 0, {"Dc/Battery/Power"}))
             info.battery_power_w = static_cast<int32_t>(std::llround(*p));
+
         info.battery_soc_pct = first_double("system", 0, {"Dc/Battery/Soc", "Soc"});
         info.battery_state = first_int("system", 0, {"Dc/Battery/State", "State"});
 
@@ -453,17 +222,18 @@ public:
         }
     }
 
-    const std::vector<MultiPlusDevice>& multiplus_devices() const
+    const std::vector<MultiPlusDevice>& multiplus_devices() const noexcept
     {
         return multiplus_devices_;
     }
 
-    const std::vector<SmartShuntDevice>& smartshunt_devices() const
+    const std::vector<SmartShuntDevice>& smartshunt_devices() const noexcept
     {
         return smartshunt_devices_;
     }
 
 private:
+    friend class Device;
     friend class SmartShuntDevice;
     friend class MultiPlusDevice;
 
@@ -471,6 +241,7 @@ private:
     {
         if (!obj || !msg || !msg->topic)
             return;
+
         static_cast<CerboGX*>(obj)->on_message(msg);
     }
 
@@ -513,6 +284,7 @@ private:
     bool wait_for_portal_id(int timeout_ms)
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
         while (std::chrono::steady_clock::now() < deadline)
         {
             {
@@ -520,14 +292,17 @@ private:
                 if (!portal_id_.empty())
                     return true;
             }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
+
         return false;
     }
 
     bool wait_for_full_publish(int timeout_ms)
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
         while (std::chrono::steady_clock::now() < deadline)
         {
             {
@@ -535,14 +310,17 @@ private:
                 if (full_publish_completed_)
                     return true;
             }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
+
         return false;
     }
 
     void request_full_publish(bool reset_flag)
     {
         std::string portal;
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             portal = portal_id_;
@@ -562,7 +340,7 @@ private:
     std::optional<std::string> raw_topic_value(const std::string& topic) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = topic_cache_.find(topic);
+        const auto it = topic_cache_.find(topic);
         if (it == topic_cache_.end())
             return std::nullopt;
         return it->second;
@@ -580,6 +358,7 @@ private:
             if (tok)
                 return tok;
         }
+
         return std::nullopt;
     }
 
@@ -596,6 +375,7 @@ private:
             if (val)
                 return val;
         }
+
         return std::nullopt;
     }
 
@@ -612,6 +392,7 @@ private:
             if (val)
                 return val;
         }
+
         return std::nullopt;
     }
 
@@ -623,9 +404,120 @@ private:
         return "N/" + portal_id_ + "/" + service + "/" + std::to_string(instance) + "/" + suffix;
     }
 
+    static std::vector<std::string> split_topic(const std::string& s, char delim = '/')
+    {
+        std::vector<std::string> parts;
+        std::string cur;
+
+        for (char c : s)
+        {
+            if (c == delim)
+            {
+                parts.push_back(cur);
+                cur.clear();
+            }
+            else
+            {
+                cur.push_back(c);
+            }
+        }
+
+        parts.push_back(cur);
+        return parts;
+    }
+
+    static std::optional<std::string> extract_json_value_token(const std::string& payload)
+    {
+        const std::string needle = "\"value\"";
+        std::size_t p = payload.find(needle);
+        if (p == std::string::npos)
+            return std::nullopt;
+
+        p = payload.find(':', p + needle.size());
+        if (p == std::string::npos)
+            return std::nullopt;
+        ++p;
+
+        while (p < payload.size() && std::isspace(static_cast<unsigned char>(payload[p])))
+            ++p;
+
+        if (p >= payload.size())
+            return std::nullopt;
+
+        if (payload[p] == '"')
+        {
+            ++p;
+            std::size_t end = p;
+            while (end < payload.size())
+            {
+                if (payload[end] == '"' && end > p && payload[end - 1] != '\\')
+                    break;
+                ++end;
+            }
+
+            if (end >= payload.size())
+                return std::nullopt;
+
+            return payload.substr(p, end - p);
+        }
+
+        std::size_t end = p;
+        while (end < payload.size() && payload[end] != ',' && payload[end] != '}')
+            ++end;
+
+        std::string token = payload.substr(p, end - p);
+
+        std::size_t first = 0;
+        while (first < token.size() && std::isspace(static_cast<unsigned char>(token[first])))
+            ++first;
+
+        std::size_t last = token.size();
+        while (last > first && std::isspace(static_cast<unsigned char>(token[last - 1])))
+            --last;
+
+        if (first >= last)
+            return std::nullopt;
+
+        token = token.substr(first, last - first);
+        if (token == "null")
+            return std::nullopt;
+
+        return token;
+    }
+
+    static std::optional<double> token_to_double(const std::optional<std::string>& tok)
+    {
+        if (!tok)
+            return std::nullopt;
+
+        try
+        {
+            return std::stod(*tok);
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    static std::optional<int> token_to_int(const std::optional<std::string>& tok)
+    {
+        if (!tok)
+            return std::nullopt;
+
+        try
+        {
+            return std::stoi(*tok);
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
     std::string ip_;
-    int port_ = 502;          // kept for API compatibility
-    int mqtt_port_ = 1883;    // actual transport used in this refactor
+    int port_ = 502;
+    int mqtt_port_ = 1883;
 
     mutable std::mutex mutex_;
     struct mosquitto* mosq_ = nullptr;
@@ -641,11 +533,6 @@ private:
     std::vector<SmartShuntDevice> smartshunt_devices_;
 };
 
-inline SmartShuntDevice::SmartShuntDevice(const CerboGX* parent, int instance)
-    : parent_(parent), instance_(instance)
-{
-}
-
 inline std::optional<SmartShuntDevice::Info> SmartShuntDevice::read() const
 {
     if (!parent_ || !parent_->is_connected())
@@ -656,18 +543,14 @@ inline std::optional<SmartShuntDevice::Info> SmartShuntDevice::read() const
     d.voltage_v = parent_->first_double("battery", instance_, {"Dc/0/Voltage", "Dc/Voltage", "Voltage"});
     d.current_a = parent_->first_double("battery", instance_, {"Dc/0/Current", "Dc/Current", "Current"});
     d.soc_pct = parent_->first_double("battery", instance_, {"Soc"});
-    if (auto p = parent_->first_double("battery", instance_, {"Dc/0/Power", "Dc/Power", "Power"}))
+
+    if (const auto p = parent_->first_double("battery", instance_, {"Dc/0/Power", "Dc/Power", "Power"}))
         d.power_w = static_cast<int32_t>(std::llround(*p));
 
     if (!d.voltage_v && !d.current_a && !d.soc_pct && !d.power_w)
         return std::nullopt;
 
     return d;
-}
-
-inline MultiPlusDevice::MultiPlusDevice(const CerboGX* parent, int instance)
-    : parent_(parent), instance_(instance)
-{
 }
 
 inline std::optional<MultiPlusDevice::Info> MultiPlusDevice::read() const
