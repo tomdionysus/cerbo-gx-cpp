@@ -540,15 +540,96 @@ inline std::optional<SmartShuntDevice::Info> SmartShuntDevice::read() const
 
     Info d;
     d.instance = instance_;
-    d.voltage_v = parent_->first_double("battery", instance_, {"Dc/0/Voltage", "Dc/Voltage", "Voltage"});
-    d.current_a = parent_->first_double("battery", instance_, {"Dc/0/Current", "Dc/Current", "Current"});
+
+    d.connected = parent_->first_int("battery", instance_, {"Connected"});
+    d.consumed_amphours = parent_->first_double("battery", instance_, {"ConsumedAmphours"});
+    d.custom_name = parent_->first_string("battery", instance_, {"CustomName"});
+
+    d.voltage_v = parent_->first_double("battery", instance_, {"Dc/0/Voltage"});
+    d.current_a = parent_->first_double("battery", instance_, {"Dc/0/Current"});
+    d.power_w = parent_->first_double("battery", instance_, {"Dc/0/Power"});
+    d.midpoint_voltage_v = parent_->first_double("battery", instance_, {"Dc/0/MidVoltage"});
+    d.midpoint_deviation_pct = parent_->first_double("battery", instance_, {"Dc/0/MidVoltageDeviation"});
+    d.temperature_c = parent_->first_double("battery", instance_, {"Dc/0/Temperature"});
+    d.aux_voltage_v = parent_->first_double("battery", instance_, {"Dc/1/Voltage"});
+
+    d.device_instance = parent_->first_int("battery", instance_, {"DeviceInstance"});
+    d.firmware_version = parent_->first_int("battery", instance_, {"FirmwareVersion"});
+    d.group_id = parent_->first_int("battery", instance_, {"GroupId"});
+    d.hardware_version = parent_->first_int("battery", instance_, {"HardwareVersion"});
+
+    d.device0.custom_name = parent_->first_string("battery", instance_, {"Devices/0/CustomName"});
+    d.device0.device_instance = parent_->first_int("battery", instance_, {"Devices/0/DeviceInstance"});
+    d.device0.firmware_version = parent_->first_int("battery", instance_, {"Devices/0/FirmwareVersion"});
+    d.device0.product_id = parent_->first_int("battery", instance_, {"Devices/0/ProductId"});
+    d.device0.product_name = parent_->first_string("battery", instance_, {"Devices/0/ProductName"});
+    d.device0.service_name = parent_->first_string("battery", instance_, {"Devices/0/ServiceName"});
+    d.device0.vreg_link = parent_->first_string("battery", instance_, {"Devices/0/VregLink"});
+
+    d.history.automatic_syncs = parent_->first_int("battery", instance_, {"History/AutomaticSyncs"});
+    d.history.average_discharge = parent_->first_double("battery", instance_, {"History/AverageDischarge"});
+    d.history.charge_cycles = parent_->first_int("battery", instance_, {"History/ChargeCycles"});
+    d.history.charged_energy = parent_->first_double("battery", instance_, {"History/ChargedEnergy"});
+    d.history.deepest_discharge = parent_->first_double("battery", instance_, {"History/DeepestDischarge"});
+    d.history.discharged_energy = parent_->first_double("battery", instance_, {"History/DischargedEnergy"});
+    d.history.full_discharges = parent_->first_int("battery", instance_, {"History/FullDischarges"});
+    d.history.high_starter_voltage_alarms = parent_->first_int("battery", instance_, {"History/HighStarterVoltageAlarms"});
+    d.history.high_voltage_alarms = parent_->first_int("battery", instance_, {"History/HighVoltageAlarms"});
+    d.history.last_discharge = parent_->first_double("battery", instance_, {"History/LastDischarge"});
+    d.history.low_starter_voltage_alarms = parent_->first_int("battery", instance_, {"History/LowStarterVoltageAlarms"});
+    d.history.low_voltage_alarms = parent_->first_int("battery", instance_, {"History/LowVoltageAlarms"});
+    d.history.maximum_starter_voltage = parent_->first_double("battery", instance_, {"History/MaximumStarterVoltage"});
+    d.history.maximum_voltage = parent_->first_double("battery", instance_, {"History/MaximumVoltage"});
+    d.history.minimum_starter_voltage = parent_->first_double("battery", instance_, {"History/MinimumStarterVoltage"});
+    d.history.minimum_voltage = parent_->first_double("battery", instance_, {"History/MinimumVoltage"});
+    d.history.time_since_last_full_charge = parent_->first_int("battery", instance_, {"History/TimeSinceLastFullCharge"});
+    d.history.total_ah_drawn = parent_->first_double("battery", instance_, {"History/TotalAhDrawn"});
+
+    d.mgmt_connection = parent_->first_string("battery", instance_, {"Mgmt/Connection"});
+    d.mgmt_process_name = parent_->first_string("battery", instance_, {"Mgmt/ProcessName"});
+    d.mgmt_process_version = parent_->first_string("battery", instance_, {"Mgmt/ProcessVersion"});
+
+    d.product_id = parent_->first_int("battery", instance_, {"ProductId"});
+    d.product_name = parent_->first_string("battery", instance_, {"ProductName"});
+    d.relay_state = parent_->first_int("battery", instance_, {"Relay/0/State"});
+    d.serial = parent_->first_string("battery", instance_, {"Serial"});
+
+    d.settings.has_mid_voltage = parent_->first_int("battery", instance_, {"Settings/HasMidVoltage"});
+    d.settings.has_starter_voltage = parent_->first_int("battery", instance_, {"Settings/HasStarterVoltage"});
+    d.settings.has_temperature = parent_->first_int("battery", instance_, {"Settings/HasTemperature"});
+    d.settings.relay_mode = parent_->first_int("battery", instance_, {"Settings/RelayMode"});
+
     d.soc_pct = parent_->first_double("battery", instance_, {"Soc"});
+    d.time_to_go_s = parent_->first_double("battery", instance_, {"TimeToGo"});
 
-    if (const auto p = parent_->first_double("battery", instance_, {"Dc/0/Power", "Dc/Power", "Power"}))
-        d.power_w = static_cast<int32_t>(std::llround(*p));
+    d.alarms.alarm = parent_->first_int("battery", instance_, {"Alarms/Alarm"});
+    d.alarms.high_starter_voltage = parent_->first_int("battery", instance_, {"Alarms/HighStarterVoltage"});
+    d.alarms.high_temperature = parent_->first_int("battery", instance_, {"Alarms/HighTemperature"});
+    d.alarms.high_voltage = parent_->first_int("battery", instance_, {"Alarms/HighVoltage"});
+    d.alarms.low_soc = parent_->first_int("battery", instance_, {"Alarms/LowSoc"});
+    d.alarms.low_starter_voltage = parent_->first_int("battery", instance_, {"Alarms/LowStarterVoltage"});
+    d.alarms.low_temperature = parent_->first_int("battery", instance_, {"Alarms/LowTemperature"});
+    d.alarms.low_voltage = parent_->first_int("battery", instance_, {"Alarms/LowVoltage"});
+    d.alarms.mid_voltage = parent_->first_int("battery", instance_, {"Alarms/MidVoltage"});
 
-    if (!d.voltage_v && !d.current_a && !d.soc_pct && !d.power_w)
+    d.vedirect.hex_checksum_errors = parent_->first_int("battery", instance_, {"VEDirect/HexChecksumErrors"});
+    d.vedirect.hex_invalid_character_errors = parent_->first_int("battery", instance_, {"VEDirect/HexInvalidCharacterErrors"});
+    d.vedirect.hex_unfinished_errors = parent_->first_int("battery", instance_, {"VEDirect/HexUnfinishedErrors"});
+    d.vedirect.text_checksum_errors = parent_->first_int("battery", instance_, {"VEDirect/TextChecksumErrors"});
+    d.vedirect.text_parse_error = parent_->first_int("battery", instance_, {"VEDirect/TextParseError"});
+    d.vedirect.text_unfinished_errors = parent_->first_int("battery", instance_, {"VEDirect/TextUnfinishedErrors"});
+
+    if (!d.connected &&
+        !d.consumed_amphours &&
+        !d.voltage_v &&
+        !d.current_a &&
+        !d.power_w &&
+        !d.soc_pct &&
+        !d.serial &&
+        !d.product_name)
+    {
         return std::nullopt;
+    }
 
     return d;
 }
